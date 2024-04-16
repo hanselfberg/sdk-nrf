@@ -13,7 +13,10 @@
 #include <mpsl_timeslot.h>
 #include <mpsl/mpsl_assert.h>
 #include <mpsl/mpsl_work.h>
+#include <zephyr/drivers/clock_control.h>
+#include <zephyr/drivers/clock_control/nrf_clock_control.h>
 #include "multithreading_lock.h"
+#include <nrfx_clock.h>
 #include <nrfx.h>
 #if defined(CONFIG_NRFX_DPPI)
 #include <nrfx_dppi.h>
@@ -302,42 +305,63 @@ static void m_assert_handler(const char *const file, const uint32_t line)
 }
 #endif /* IS_ENABLED(CONFIG_MPSL_ASSERT_HANDLER) */
 
-#if !defined(CONFIG_SOC_SERIES_NRF54HX)
-static uint8_t m_config_clock_source_get(void)
-{
-#ifdef CONFIG_CLOCK_CONTROL_NRF_K32SRC_RC
-	return MPSL_CLOCK_LF_SRC_RC;
-#elif CONFIG_CLOCK_CONTROL_NRF_K32SRC_XTAL
-	return MPSL_CLOCK_LF_SRC_XTAL;
-#elif CONFIG_CLOCK_CONTROL_NRF_K32SRC_SYNTH
-	return MPSL_CLOCK_LF_SRC_SYNTH;
-#elif CONFIG_CLOCK_CONTROL_NRF_K32SRC_EXT_LOW_SWING
-	return MPSL_CLOCK_LF_SRC_EXT_LOW_SWING;
-#elif CONFIG_CLOCK_CONTROL_NRF_K32SRC_EXT_FULL_SWING
-	return MPSL_CLOCK_LF_SRC_EXT_FULL_SWING;
-#else
-	#error "Clock source is not supported or not defined"
-	return 0;
-#endif
-}
-#endif /* !CONFIG_SOC_SERIES_NRF54HX */
+// #if !defined(CONFIG_SOC_SERIES_NRF54HX)
+// static uint8_t m_config_clock_source_get(void)
+// {
+// #ifdef CONFIG_CLOCK_CONTROL_NRF_K32SRC_RC
+// 	return MPSL_CLOCK_LF_SRC_RC;
+// #elif CONFIG_CLOCK_CONTROL_NRF_K32SRC_XTAL
+// 	return MPSL_CLOCK_LF_SRC_XTAL;
+// #elif CONFIG_CLOCK_CONTROL_NRF_K32SRC_SYNTH
+// 	return MPSL_CLOCK_LF_SRC_SYNTH;
+// #elif CONFIG_CLOCK_CONTROL_NRF_K32SRC_EXT_LOW_SWING
+// 	return MPSL_CLOCK_LF_SRC_EXT_LOW_SWING;
+// #elif CONFIG_CLOCK_CONTROL_NRF_K32SRC_EXT_FULL_SWING
+// 	return MPSL_CLOCK_LF_SRC_EXT_FULL_SWING;
+// #else
+// 	#error "Clock source is not supported or not defined"
+// 	return 0;
+// #endif
+// }
+// #endif /* !CONFIG_SOC_SERIES_NRF54HX */
 
 #if defined(CONFIG_CLOCK_CONTROL_NRF_K32SRC_RC) && !defined(CONFIG_SOC_SERIES_NRF54HX)
 static void mpsl_calibration_work_handler(struct k_work *work)
 {
 	ARG_UNUSED(work);
 
-	mpsl_calibration_timer_handle();
+	//mpsl_calibration_timer_handle();
 
 	k_work_schedule_for_queue(&mpsl_work_q, &calibration_work,
 				  K_MSEC(CONFIG_CLOCK_CONTROL_NRF_CALIBRATION_PERIOD));
 }
 #endif /* CONFIG_CLOCK_CONTROL_NRF_K32SRC_RC && !CONFIG_SOC_SERIES_NRF54HX */
 
+static bool m_hfclk_is_running(void)
+{
+	nrf_clock_hfclk_t hfclk_src;
+
+	(void)nrfx_clock_is_running(NRF_CLOCK_DOMAIN_HFCLK, (void *)&hfclk_src);
+	return (hfclk_src == NRF_CLOCK_HFCLK_HIGH_ACCURACY);
+}
+
 static int32_t mpsl_lib_init_internal(void)
 {
 	int err = 0;
-	mpsl_clock_lfclk_cfg_t clock_cfg;
+	mpsl_clock_hfclk_cfg_t clock_cfg = {
+		.request = z_nrf_clock_bt_ctlr_hf_request,
+        .release = z_nrf_clock_bt_ctlr_hf_release,
+		.hf_is_running = m_hfclk_is_running,
+        .wait_for_lfclk = 0,
+#ifdef CONFIG_CLOCK_CONTROL_NRF_K32SRC_RC_CALIBRATION
+		.lf_calibration_start = z_nrf_clock_calibration_force_start,
+#else
+		.lf_calibration_start = 0,
+#endif
+        .lf_calibration_enabled = 0,
+        .compatibillity_hook_on_init = 0,
+		.compatibillity_hook_on_uninit = 0};
+	// mpsl_clock_lfclk_cfg_t clock_cfg;
 
 #ifdef CONFIG_MPSL_TRIGGER_IPC_TASK_ON_RTC_START
 	nrf_ipc_send_config_set(NRF_IPC,
@@ -347,36 +371,39 @@ static int32_t mpsl_lib_init_internal(void)
 		(uint32_t)&NRF_IPC->TASKS_SEND[CONFIG_MPSL_TRIGGER_IPC_TASK_ON_RTC_START_CHANNEL]);
 #endif
 
-	/* TODO: Clock config should be adapted in the future to new architecture. */
-#if !defined(CONFIG_SOC_SERIES_NRF54HX)
-	clock_cfg.source = m_config_clock_source_get();
-	clock_cfg.accuracy_ppm = CONFIG_CLOCK_CONTROL_NRF_ACCURACY;
-	clock_cfg.skip_wait_lfclk_started =
-		IS_ENABLED(CONFIG_SYSTEM_CLOCK_NO_WAIT);
+// 	/* TODO: Clock config should be adapted in the future to new architecture. */
+// #if !defined(CONFIG_SOC_SERIES_NRF54HX)
+// 	clock_cfg.source = m_config_clock_source_get();
+// 	clock_cfg.accuracy_ppm = CONFIG_CLOCK_CONTROL_NRF_ACCURACY;
+// 	clock_cfg.skip_wait_lfclk_started =
+// 		IS_ENABLED(CONFIG_SYSTEM_CLOCK_NO_WAIT);
 
-#ifdef CONFIG_CLOCK_CONTROL_NRF_K32SRC_RC
-	BUILD_ASSERT(IS_ENABLED(CONFIG_CLOCK_CONTROL_NRF_K32SRC_RC_CALIBRATION),
-		    "MPSL requires clock calibration to be enabled when RC is used as LFCLK");
+// #ifdef CONFIG_CLOCK_CONTROL_NRF_K32SRC_RC
+// 	BUILD_ASSERT(IS_ENABLED(CONFIG_CLOCK_CONTROL_NRF_K32SRC_RC_CALIBRATION),
+// 		    "MPSL requires clock calibration to be enabled when RC is used as LFCLK");
 
-	/* clock_cfg.rc_ctiv is given in 1/4 seconds units.
-	 * CONFIG_CLOCK_CONTROL_NRF_CALIBRATION_PERIOD is given in ms. */
-	clock_cfg.rc_ctiv = (CONFIG_CLOCK_CONTROL_NRF_CALIBRATION_PERIOD * 4 / 1000);
-	clock_cfg.rc_temp_ctiv = CONFIG_CLOCK_CONTROL_NRF_CALIBRATION_MAX_SKIP + 1;
-	BUILD_ASSERT(CONFIG_CLOCK_CONTROL_NRF_CALIBRATION_TEMP_DIFF == 2,
-		     "MPSL always uses a temperature diff threshold of 0.5 degrees");
-#else
-	clock_cfg.rc_ctiv = 0;
-	clock_cfg.rc_temp_ctiv = 0;
-#endif
-#else
-	/* For now just set the values to 0 to avoid "use of uninitialized variable" warnings.
-	 * MPSL assumes the clocks are always available and does currently not implement
-	 * clock handling on these platforms. The LFCLK is expected to have an accuracy of
-	 * 500ppm or better regardless of the value passed in clock_cfg.
-	 */
-	memset(&clock_cfg, 0, sizeof(clock_cfg));
-#endif
+// 	/* clock_cfg.rc_ctiv is given in 1/4 seconds units.
+// 	 * CONFIG_CLOCK_CONTROL_NRF_CALIBRATION_PERIOD is given in ms. */
+// 	clock_cfg.rc_ctiv = (CONFIG_CLOCK_CONTROL_NRF_CALIBRATION_PERIOD * 4 / 1000);
+// 	clock_cfg.rc_temp_ctiv = CONFIG_CLOCK_CONTROL_NRF_CALIBRATION_MAX_SKIP + 1;
+// 	BUILD_ASSERT(CONFIG_CLOCK_CONTROL_NRF_CALIBRATION_TEMP_DIFF == 2,
+// 		     "MPSL always uses a temperature diff threshold of 0.5 degrees");
+// #else
+// 	clock_cfg.rc_ctiv = 0;
+// 	clock_cfg.rc_temp_ctiv = 0;
+// #endif
+// #else
+// 	/* For now just set the values to 0 to avoid "use of uninitialized variable" warnings.
+// 	 * MPSL assumes the clocks are always available and does currently not implement
+// 	 * clock handling on these platforms. The LFCLK is expected to have an accuracy of
+// 	 * 500ppm or better regardless of the value passed in clock_cfg.
+// 	 */
+// 	memset(&clock_cfg, 0, sizeof(clock_cfg));
+// #endif
 
+//	err = mpsl_init(&clock_cfg, CONFIG_MPSL_LOW_PRIO_IRQN, m_assert_handler);
+	mpsl_clock_hfclk_latency_set(MPSL_CLOCK_HF_LATENCY_TYPICAL);
+	mpsl_clock_lfclk_accuracy_ppm_set(250);
 	err = mpsl_init(&clock_cfg, CONFIG_MPSL_LOW_PRIO_IRQN, m_assert_handler);
 	if (err) {
 		return err;
